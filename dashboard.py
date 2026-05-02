@@ -5,6 +5,27 @@ import altair as alt
 st.set_page_config(page_title="Retail Sales", layout="wide")
 st.title("US Retail Sales by Category")
 
+CATEGORY_DESCRIPTIONS = {
+    "Total": "All retail trade and food services combined.",
+    "Retail Only": "All retail trade excluding food services and drinking places.",
+    "Motor Vehicle & Parts Dealers": "New and used car dealers, RV dealers, motorcycle shops, and auto parts/tire stores.",
+    "Auto Parts, Accessories & Tire Stores": "Stores selling auto parts, accessories, and tires — excludes new/used vehicle dealers.",
+    "Furniture & Home Furnishing Stores": "Furniture, home furnishings, floor coverings, and window treatment stores.",
+    "Electronics & Appliance Stores": "Household appliances, TVs, computers, cameras, and consumer electronics stores.",
+    "Building Material & Garden Equipment": "Lumber yards, hardware stores, paint shops, and garden supply stores (e.g. Home Depot, Lowe's).",
+    "Food & Beverage Stores": "Grocery stores, specialty food stores, beer/wine/liquor stores.",
+    "Grocery Stores": "Supermarkets and other grocery stores selling a general line of food products.",
+    "Health & Personal Care Stores": "Pharmacies, drugstores, optical goods, health food, and cosmetics stores.",
+    "Gasoline Stations": "Establishments primarily retailing automotive fuels — may also sell convenience items.",
+    "Clothing & Accessories Stores": "New clothing, shoes, jewelry, luggage, and accessory stores.",
+    "Sporting Goods, Hobby, Book & Music": "Sporting goods, hobby supplies, toy stores, book stores, and musical instrument dealers.",
+    "General Merchandise Stores": "Broad merchandise retailers including department stores, warehouse clubs (Costco, Target, Walmart).",
+    "Department Stores": "Large stores organized into departments selling apparel, home goods, and general merchandise.",
+    "Miscellaneous Store Retailers": "Florists, office supply, pet supply, art dealers, tobacco stores, and other specialty retailers.",
+    "Nonstore Retailers": "Retailers with no fixed storefront — includes e-commerce, mail-order catalogs, vending machines, and door-to-door sales.",
+    "Food Services & Drinking Places": "Restaurants, fast food, bars, cafeterias, food trucks, and caterers. Not traditional retail — included because Census surveys it alongside retail.",
+}
+
 AGGREGATE_COLS = [
     "Total Retail & Food Services",
     "Retail Only (excl. Food Services)",
@@ -30,7 +51,7 @@ try:
         + individual_cols
     )
 
-    tab1, tab2, tab3 = st.tabs(["Trend", "All Categories", "E-Commerce"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Trend", "All Categories", "E-Commerce", "MoM / YoY", "Volatility"])
 
     with tab1:
         selection = st.selectbox("Category", dropdown_options)
@@ -161,6 +182,103 @@ try:
             st.caption("Source: Census Bureau MRTS, NAICS 4541 — Electronic Shopping & Mail-Order Houses")
         except FileNotFoundError:
             st.error("ecommerce_sales.csv not found. Run retail_sales_scraper.py first.")
+
+    with tab4:
+        raw = pd.read_csv("retail_sales_by_category.csv")
+        raw = raw.sort_values("date").reset_index(drop=True)
+
+        display_cats = ["Total", "Retail Only"] + individual_cols
+        display_cats = [c for c in display_cats if c in raw.columns]
+
+        for c in display_cats:
+            raw[c] = pd.to_numeric(raw[c], errors="coerce")
+
+        months = raw["date"].tolist()
+        selected_month = st.selectbox("Month", months[::-1], index=0)
+        idx = raw[raw["date"] == selected_month].index[0]
+
+        current = raw.iloc[idx]
+        prev_month = raw.iloc[idx - 1] if idx >= 1 else None
+        prev_year = raw.iloc[idx - 12] if idx >= 12 else None
+
+        rows = []
+        for c in display_cats:
+            mom = ((current[c] - prev_month[c]) / prev_month[c] * 100) if prev_month is not None else None
+            yoy = ((current[c] - prev_year[c]) / prev_year[c] * 100) if prev_year is not None else None
+            rows.append({"Category": c, "MoM %": mom, "YoY %": yoy})
+
+        summary = pd.DataFrame(rows)
+
+        summary["Description"] = summary["Category"].map(CATEGORY_DESCRIPTIONS).fillna("")
+
+        def color_pct(val):
+            if pd.isna(val):
+                return ""
+            return "background-color: #1a6fb5; color: white" if val >= 0 else "background-color: #d4641a; color: white"
+
+        styled = (
+            summary.style
+            .map(color_pct, subset=["MoM %", "YoY %"])
+            .format({"MoM %": "{:+.0f}%", "YoY %": "{:+.0f}%"}, na_rep="—")
+        )
+
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            height=600,
+            hide_index=True,
+            column_config={
+                "Description": st.column_config.TextColumn("Description", width="large"),
+            },
+        )
+
+    with tab5:
+        raw_v = pd.read_csv("retail_sales_by_category.csv")
+        raw_v = raw_v.sort_values("date").reset_index(drop=True)
+
+        vol_cats = ["Total", "Retail Only"] + individual_cols
+        vol_cats = [c for c in vol_cats if c in raw_v.columns]
+
+        for c in vol_cats:
+            raw_v[c] = pd.to_numeric(raw_v[c], errors="coerce")
+
+        raw_v["date"] = pd.to_datetime(raw_v["date"])
+        min_y = raw_v["date"].dt.year.min()
+        max_y = raw_v["date"].dt.year.max()
+        v_start, v_end = st.slider("Year Range", min_y, max_y, (min_y, max_y), key="vol_slider")
+        raw_v = raw_v[(raw_v["date"].dt.year >= v_start) & (raw_v["date"].dt.year <= v_end)]
+
+        rows = []
+        for c in vol_cats:
+            s = raw_v[c].dropna()
+            mom_std = (s.pct_change() * 100).std()
+            rows.append({"Category": c, "MoM Std Dev %": mom_std})
+
+        vol_df = pd.DataFrame(rows)
+
+        def gradient_color(col_series):
+            mn, mx = col_series.min(), col_series.max()
+            styles = []
+            for val in col_series:
+                if pd.isna(val) or mx == mn:
+                    styles.append("")
+                else:
+                    t = (val - mn) / (mx - mn)  # 0 = least volatile, 1 = most volatile
+                    r = int(26 + (1 - t) * (173 - 26))
+                    g = int(111 + (1 - t) * (216 - 111))
+                    b = int(181 + (1 - t) * (230 - 181))
+                    text = "white" if t > 0.5 else "#333"
+                    styles.append(f"background-color: rgb({r},{g},{b}); color: {text}")
+            return styles
+
+        styled_vol = (
+            vol_df.style
+            .apply(gradient_color, subset=["MoM Std Dev %"])
+            .format({"MoM Std Dev %": "{:.1f}%"}, na_rep="—")
+        )
+
+        st.caption("Std dev of month-over-month % changes. Darker blue = more volatile.")
+        st.dataframe(styled_vol, use_container_width=True, height=600, hide_index=True)
 
 except FileNotFoundError:
     st.error("retail_sales_by_category.csv not found. Run retail_sales_scraper.py first.")
